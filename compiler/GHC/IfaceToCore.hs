@@ -111,6 +111,7 @@ import qualified GHC.Data.BooleanFormula as BF
 
 import Control.Monad
 import GHC.Parser.Annotation
+import GHC.Driver.Env.KnotVars
 
 {-
 This module takes
@@ -382,7 +383,7 @@ mergeIfaceDecls = plusOccEnv_C mergeIfaceDecl
 -- type synonym.  Perhaps this should be relaxed, where a type synonym
 -- in a signature is considered implemented by a data type declaration
 -- which matches the reference of the type synonym.
-typecheckIfacesForMerging :: Module -> [ModIface] -> (Module -> Maybe (IORef TypeEnv)) -> IfM lcl (TypeEnv, [ModDetails])
+typecheckIfacesForMerging :: Module -> [ModIface] -> (KnotVars (IORef TypeEnv)) -> IfM lcl (TypeEnv, [ModDetails])
 typecheckIfacesForMerging mod ifaces tc_env_vars =
   -- cannot be boot (False)
   initIfaceLcl mod (text "typecheckIfacesForMerging") NotBoot $ do
@@ -405,7 +406,7 @@ typecheckIfacesForMerging mod ifaces tc_env_vars =
     names_w_things <- tcIfaceDecls ignore_prags (map (\x -> (fingerprint0, x))
                                                   (occEnvElts decl_env))
     let global_type_env = mkNameEnv names_w_things
-    case tc_env_vars mod of
+    case lookupKnotVars tc_env_vars mod of
       Just tc_env_var -> writeMutVar tc_env_var global_type_env
       Nothing -> return ()
 
@@ -1778,7 +1779,8 @@ tcPragExpr is_compulsory toplvl name expr
     get_in_scope :: IfL VarSet -- Totally disgusting; but just for linting
     get_in_scope
         = do { (gbl_env, lcl_env) <- getEnvs
-             ; top_level_vars <- maybe (return []) (fmap typeEnvIds . setLclEnv ()) (if_type_env gbl_env)
+             ; let type_envs = knotVarElems (if_rec_types gbl_env)
+             ; top_level_vars <- concat <$> mapM (fmap typeEnvIds . setLclEnv ())  type_envs
              ; return (bindingsVars (if_tv_env lcl_env) `unionVarSet`
                        bindingsVars (if_id_env lcl_env) `unionVarSet`
                        mkVarSet top_level_vars) }
@@ -1812,7 +1814,7 @@ tcIfaceGlobal name
   | otherwise
   = do  { env <- getGblEnv
         ; cur_mod <- if_mod <$> getLclEnv
-        ; case if_rec_types env (fromMaybe cur_mod (nameModule_maybe name))  of     -- Note [Tying the knot]
+        ; case lookupKnotVars (if_rec_types env) (fromMaybe cur_mod (nameModule_maybe name))  of     -- Note [Tying the knot]
             Just get_type_env
                 -> do           -- It's defined in the module being compiled
                 { type_env <- setLclEnv () get_type_env         -- yuk

@@ -81,7 +81,7 @@ queueAction act_var key initialiser raw_act = do
 -- to. A 'Nothing' value contains the result of compilation, and denotes the
 -- end of the message queue.
 data LogQueue = LogQueue !Int
-                         !(IORef [Maybe (MessageClass, SrcSpan, SDoc)])
+                         !(IORef [Maybe (MessageClass, SrcSpan, SDoc, LogFlags)])
                          !(MVar ())
 
 newLogQueue :: Int -> IO LogQueue
@@ -95,12 +95,12 @@ finishLogQueue lq = do
   writeLogQueueInternal lq Nothing
 
 
-writeLogQueue :: LogQueue -> (MessageClass,SrcSpan,SDoc) -> IO ()
+writeLogQueue :: LogQueue -> (MessageClass,SrcSpan,SDoc, LogFlags) -> IO ()
 writeLogQueue lq msg = do
   writeLogQueueInternal lq (Just msg)
 
 -- | Internal helper for writing log messages
-writeLogQueueInternal :: LogQueue -> Maybe (MessageClass,SrcSpan,SDoc) -> IO ()
+writeLogQueueInternal :: LogQueue -> Maybe (MessageClass,SrcSpan,SDoc, LogFlags) -> IO ()
 writeLogQueueInternal (LogQueue _n ref sem) msg = do
     atomicModifyIORef' ref $ \msgs -> (msg:msgs,())
     _ <- tryPutMVar sem ()
@@ -109,8 +109,8 @@ writeLogQueueInternal (LogQueue _n ref sem) msg = do
 -- The log_action callback that is used to synchronize messages from a
 -- worker thread.
 parLogAction :: LogQueue -> LogAction
-parLogAction log_queue _dflags !msgClass !srcSpan !msg =
-    writeLogQueue log_queue (msgClass,srcSpan,msg)
+parLogAction log_queue log_flags !msgClass !srcSpan !msg =
+    writeLogQueue log_queue (msgClass,srcSpan,msg, log_flags)
 
 -- Print each message from the log_queue using the global logger
 printLogs :: Logger -> LogQueue -> IO ()
@@ -122,8 +122,8 @@ printLogs !logger (LogQueue _n ref sem) = read_msgs
 
         print_loop [] = read_msgs
         print_loop (x:xs) = case x of
-            Just (msgClass,srcSpan,msg) -> do
-                logMsg logger msgClass srcSpan msg
+            Just (msgClass,srcSpan,msg,flags) -> do
+                logMsg (setLogFlags logger flags) msgClass srcSpan msg
                 print_loop xs
             -- Exit the loop once we encounter the end marker.
             Nothing -> return ()

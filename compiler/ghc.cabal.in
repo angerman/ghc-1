@@ -396,6 +396,7 @@ Library
         GHC.Driver.Config.Logger
         GHC.Driver.Config.Parser
         GHC.Driver.Env
+        GHC.Driver.Env.KnotVars
         GHC.Driver.Env.Types
         GHC.Driver.Errors
         GHC.Driver.Errors.Ppr

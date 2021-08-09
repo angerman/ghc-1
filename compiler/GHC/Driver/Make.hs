@@ -64,7 +64,6 @@ import GHC.Linker.Types
 import GHC.Runtime.Context
 
 import GHC.Driver.Config.Finder (initFinderOpts)
-import GHC.Driver.Config.Logger (initLogFlags)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Driver.Config.Diagnostic
 import GHC.Driver.Phases
@@ -152,6 +151,7 @@ import GHC.Types.TypeEnv
 import Control.Monad.Trans.State.Lazy
 import Control.Monad.Trans.Class
 import qualified Data.Set as S
+import GHC.Driver.Env.KnotVars
 
 label_self :: String -> IO ()
 label_self thread_name = do
@@ -2362,16 +2362,14 @@ actionInterpret fa =
         let -- Use the cached DynFlags which includes OPTIONS_GHC pragmas
             lcl_dynflags = ms_hspp_opts mod
             lcl_logger =
-              -- Apply local log options to the logger from OPTIONS_GHC
-              flip setLogFlags (initLogFlags lcl_dynflags) $
               -- Set the log hook to the action which pipes into the log queue
               pushLogHook (const (parLogAction lq)) (hsc_logger hsc_env)
         let lcl_hsc_env =
                 -- Localise the logger to use the cached flags
                 addDepsToHscEnv deps $
+                hscSetFlags lcl_dynflags $
                 hsc_env { hsc_logger = lcl_logger
-                        , hsc_dflags = lcl_dynflags
-                        , hsc_type_env_vars = lookupModuleEnv knot_var }
+                        , hsc_type_env_vars = knotVarsFromModuleEnv knot_var }
         -- Compile the module
         lift $ MaybeT (wrapAction lcl_hsc_env $ upsweep_mod lcl_hsc_env (Just batchMsg) old_hpt mod k n)
     Make_TypecheckLoop knot_var nk deps -> do
@@ -2386,7 +2384,7 @@ actionInterpret fa =
         Nothing -> return Nothing
         Just hmis -> do
           let hmis' = catMaybes hmis
-          let lcl_hsc_env = addDepsToHscEnv other_deps $ hsc_env { hsc_type_env_vars = lookupModuleEnv knot_var }
+          let lcl_hsc_env = addDepsToHscEnv other_deps $ hsc_env { hsc_type_env_vars =  knotVarsFromModuleEnv knot_var }
           liftIO $ Just . map snd <$> typecheckLoop lcl_hsc_env hmis'
 
 useMGN :: TPipelineClass MakeAction p =>  ModuleGraphNode -> p (Maybe HomeModInfo)

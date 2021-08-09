@@ -235,6 +235,7 @@ import Data.Functor
 import Control.DeepSeq (force)
 import Data.Bifunctor (first)
 import GHC.Data.Maybe
+import GHC.Driver.Env.KnotVars
 
 {- **********************************************************************
 %*                                                                      *
@@ -256,7 +257,7 @@ newHscEnv dflags = do
                   ,  hsc_IC             = emptyInteractiveContext dflags
                   ,  hsc_NC             = nc_var
                   ,  hsc_FC             = fc_var
-                  ,  hsc_type_env_vars  = const Nothing
+                  ,  hsc_type_env_vars  = emptyKnotVars
                   ,  hsc_interp         = Nothing
                   ,  hsc_unit_env       = unit_env
                   ,  hsc_plugins        = []
@@ -1051,7 +1052,7 @@ genModDetails hsc_env old_iface
                   initIfaceLoadModule hsc_env (mi_module old_iface) (typecheckIface old_iface)
     -- Important to do this as now the DFuns are globalised
     -- MP: BIG TODO to link this back to what UpdateIdInfos used to do
-    case hsc_type_env_vars hsc_env (mi_module old_iface) of
+    case lookupKnotVars (hsc_type_env_vars hsc_env) (mi_module old_iface) of
       Nothing -> return ()
       Just te_var -> writeIORef te_var (md_types new_details)
     dumpIfaceStats hsc_env

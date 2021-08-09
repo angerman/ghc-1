@@ -114,6 +114,7 @@ import GHC.Utils.Panic
 import qualified GHC.Data.Strict as Strict
 
 import Data.IORef
+import GHC.Driver.Env.KnotVars
 
 {-
 ************************************************************************
@@ -334,10 +335,9 @@ mkDsEnvs unit_env mod rdr_env type_env fam_inst_env msg_var cc_st_var
   -- MP: NOTE, failing tests here are `ghci` and `T11985`
   -- this is very very "at a distance" because the reason for this check is that the type_env in interactive
   -- mode is the smushed together of all the interactive modules.
-                             , if_rec_types = \that_mod -> if that_mod == mod || isInteractiveModule mod
+                             , if_rec_types = KnotVars [mod] (\that_mod -> if that_mod == mod || isInteractiveModule mod
                                                           then Just (return type_env)
-                                                          else Nothing
-                             , if_type_env  = Just (return type_env) }
+                                                          else Nothing) }
         if_lenv = mkIfLclEnv mod (text "GHC error in desugarer lookup in" <+> ppr mod)
                              NotBoot
         real_span = realSrcLocSpan (mkRealSrcLoc (moduleNameFS (moduleName mod)) 1 1)

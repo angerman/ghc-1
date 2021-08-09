@@ -117,6 +117,7 @@ import Control.Monad
 import Data.Map ( toList )
 import System.FilePath
 import System.Directory
+import GHC.Driver.Env.KnotVars
 
 {-
 ************************************************************************
@@ -531,7 +532,7 @@ loadInterface doc_str mod from
                               }
                }
 
-        ; let bad_boot = mi_boot iface == IsBoot && isJust (if_rec_types gbl_env mod)
+        ; let bad_boot = mi_boot iface == IsBoot && isJust (lookupKnotVars (if_rec_types gbl_env) mod)
                             -- Warn against an EPS-updating import
                             -- of one's own boot file! (one-shot only)
                             -- See Note [Loading your own hi-boot file]

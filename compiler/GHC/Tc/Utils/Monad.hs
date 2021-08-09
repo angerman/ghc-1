@@ -221,6 +221,7 @@ import GHC.Tc.Errors.Types
 import {-# SOURCE #-} GHC.Tc.Utils.Env    ( tcInitTidyEnv )
 
 import qualified Data.Map as Map
+import GHC.Driver.Env.KnotVars
 
 {-
 ************************************************************************
@@ -249,10 +250,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
         infer_var    <- newIORef True ;
         infer_reasons_var <- newIORef emptyMessages ;
         dfun_n_var   <- newIORef emptyOccSet ;
-        !type_env_var <- case hsc_type_env_vars hsc_env mod of {
-                           Just {} -> return (hsc_type_env_vars hsc_env) ;
-                           Nothing -> return (hsc_type_env_vars hsc_env) } ;
-                           --Nothing -> pprTrace "miss" (ppr mod) $  mkModuleEnv . (:[]) . (mod,) <$> newIORef emptyNameEnv } ;
+        let { type_env_var = hsc_type_env_vars hsc_env };
 
         dependent_files_var <- newIORef [] ;
         static_wc_var       <- newIORef emptyWC ;
@@ -2065,7 +2063,6 @@ initIfaceTcRn :: IfG a -> TcRn a
 initIfaceTcRn thing_inside
   = do  { tcg_env <- getGblEnv
         ; hsc_env <- getTopEnv
-        ; this_mod <- tcg_mod <$> getGblEnv
           -- bangs to avoid leaking the envs (#19356)
         ; let !home_unit = hsc_home_unit hsc_env
               -- When we are instantiating a signature, we DEFINITELY
@@ -2075,9 +2072,9 @@ initIfaceTcRn thing_inside
                             if_doc = text "initIfaceTcRn",
                             if_rec_types =
                                 if is_instantiate
-                                    then return Nothing
-                                    else fmap readTcRef <$!> tcg_type_env_var tcg_env
-                            , if_type_env = readTcRef <$!> tcg_type_env_var tcg_env this_mod }
+                                    then emptyKnotVars
+                                    else readTcRef <$> tcg_type_env_var tcg_env
+                            }
                          }
         ; setEnvs (if_env, ()) thing_inside }
 
@@ -2089,8 +2086,7 @@ initIfaceLoad :: HscEnv -> IfG a -> IO a
 initIfaceLoad hsc_env do_this
  = do let gbl_env = IfGblEnv {
                         if_doc = text "initIfaceLoad",
-                        if_rec_types = const Nothing,
-                        if_type_env  = Nothing
+                        if_rec_types = emptyKnotVars
                     }
       initTcRnIf 'i' hsc_env gbl_env () do_this
 
@@ -2102,8 +2098,7 @@ initIfaceLoadModule :: HscEnv -> Module -> IfG a -> IO a
 initIfaceLoadModule hsc_env this_mod do_this
  = do let gbl_env = IfGblEnv {
                         if_doc = text "initIfaceLoadModule",
-                        if_rec_types = \that_mod -> if that_mod == this_mod then Nothing else (fmap readTcRef) (hsc_type_env_vars hsc_env that_mod),
-                        if_type_env  =  (fmap readTcRef) (hsc_type_env_vars hsc_env this_mod)
+                        if_rec_types = readTcRef <$> knotVarsWithout this_mod (hsc_type_env_vars hsc_env)
                     }
       initTcRnIf 'i' hsc_env gbl_env () do_this
 
@@ -2113,8 +2108,7 @@ initIfaceCheck :: SDoc -> HscEnv -> IfG a -> IO a
 initIfaceCheck doc hsc_env do_this
  = do let gbl_env = IfGblEnv {
                         if_doc = text "initIfaceCheck" <+> doc,
-                        if_rec_types = fmap (fmap readTcRef) (hsc_type_env_vars hsc_env),
-                        if_type_env  = Nothing
+                        if_rec_types = readTcRef <$> hsc_type_env_vars hsc_env
                     }
       initTcRnIf 'i' hsc_env gbl_env () do_this
 
