@@ -2238,7 +2238,7 @@ data MakeAction a where
                              -> MakeAction ()
 
 instance Outputable (MakeAction a) where
-  ppr (Make_TypecheckLoop _knot_var nks _) = hcat [text "TC:", ppr (nks)]
+  ppr (Make_TypecheckLoop _knot_var nks _) = hcat [text "TC:", ppr (map mkNodeKey nks)]
   ppr (Make_CompileModule ms) = hcat [text "Compile:", ppr (ms_mod ms) ]
   ppr (Make_TypecheckInstantiatedUnit iu) = hcat [text "Inst:", ppr iu]
 
@@ -2353,7 +2353,7 @@ actionInterpret fa =
                         HsigFile ->
                           let mod_name = homeModuleInstantiation (hsc_home_unit hsc_env) (ms_mod mod)
                           in mkModuleEnv . (:[]) . (mod_name,) <$> newIORef emptyTypeEnv
-                        _ -> return emptyModuleEnv -- ms_mod mod
+                        _ -> return emptyModuleEnv
 
       knot_var <- liftIO $ maybe mk_mod return (build_node_var nbi)
 
@@ -2374,12 +2374,12 @@ actionInterpret fa =
         lift $ MaybeT (wrapAction lcl_hsc_env $ upsweep_mod lcl_hsc_env (Just batchMsg) old_hpt mod k n)
     Make_TypecheckLoop knot_var nk deps -> do
       hsc_env <- asks hsc_env
-      other_deps <- process_deps deps
       env <- ask
       -- This is a bit awkward as you need to make sure that all the modules are queued
       -- so that the log queues get finished so need to be really careful to not
       -- to use the early cut-off from MaybeT.
       hmis <- liftIO $ sequence $ map (runMaybeT . flip runReaderT env . useMGN) nk
+      other_deps <- process_deps deps
       lift $ MaybeT $ case sequence hmis of
         Nothing -> return Nothing
         Just hmis -> do
