@@ -86,7 +86,7 @@ import GHC.Iface.Recomp    ( RecompileRequired ( MustCompile ) )
 import GHC.Data.Bag        ( listToBag )
 import GHC.Data.Graph.Directed
 import GHC.Data.FastString
-import GHC.Data.Maybe      ( expectJust, MaybeT (MaybeT, runMaybeT) )
+import GHC.Data.Maybe      ( expectJust )
 import GHC.Data.StringBuffer
 import qualified GHC.LanguageExtensions as LangExt
 
@@ -152,6 +152,8 @@ import Control.Monad.Trans.State.Lazy
 import Control.Monad.Trans.Class
 import qualified Data.Set as S
 import GHC.Driver.Env.KnotVars
+import Control.Concurrent.STM
+import Control.Monad.Trans.Maybe
 
 label_self :: String -> IO ()
 label_self thread_name = do
@@ -889,8 +891,7 @@ data NodeBuildInfo = NodeBuildInfo { nk :: (Int, Int)
                                    , build_node_key :: NodeKey
                                    , build_node_var :: Maybe (ModuleEnv (IORef TypeEnv))
                                    , build_self :: WrappedMakePipeline (Maybe HomeModInfo)
-                                   , build_deps :: WrappedMakePipeline [HomeModInfo]
-                                   , node_log_queue :: LogQueue }
+                                   , build_deps :: WrappedMakePipeline [HomeModInfo] }
 
 -- | Given the build plan, creates a graph which indicates where each NodeKey should
 -- get its direct dependencies from. This might not be the corresponding build action
@@ -910,9 +911,8 @@ createBuildMap deps_map plan = evalStateT (buildLoop plan) (BuildLoopState M.emp
       -- 1. Get the transitive dependencies of this module, by looking up in the dependency map
       let trans_deps = expectJust "build_module" $ Map.lookup (mkNodeKey mod) deps_map
       -- Set the default way to build this node, not in a loop here
-      lq <- liftIO (newLogQueue mod_idx)
       let default_action = useMGN mod
-          nbi = NodeBuildInfo ((mod_idx, n_mods)) (mkNodeKey mod) knot_var default_action (process_deps build_deps) lq
+          nbi = NodeBuildInfo ((mod_idx, n_mods)) (mkNodeKey mod) knot_var default_action (process_deps build_deps)
           doc_build_deps = catMaybes $ map (flip M.lookup home_mod_map) trans_deps
           build_deps = map snd doc_build_deps
       setModulePipeline (mkNodeKey mod) (text "N") default_action
@@ -2247,7 +2247,8 @@ type WrappedMakePipeline = WrappedPipeline MakeAction
 data MakeEnv = MakeEnv { hsc_env :: HscEnv
                        , old_hpt :: HomePackageTable
                        , mod_map  :: M.Map NodeKey NodeBuildInfo
-                       , actionMap :: MVar (ActionMap MakeAction) }
+                       , actionMap :: MVar (ActionMap MakeAction)
+                       , lqq_var :: TVar LogQueueQueue }
 
 instance MonadIO m => MonadUse MakeAction (ReaderT MakeEnv (MaybeT m)) where
   use fa = cachedInterpret fa
@@ -2268,7 +2269,6 @@ instance GOrd MakeAction where
 cachedInterpret :: MonadIO m => MakeAction a -> ReaderT MakeEnv (MaybeT m) a
 cachedInterpret fa = do
   env@(MakeEnv{..}) <- ask
-  mnbi <- getNBI fa
   -- Create a thread-local FS so the local files can be cleaned promptly
   let initialiser = do
         lcl_tmpfs <- liftIO $ forkTmpFsFrom (hsc_tmpfs hsc_env)
@@ -2278,23 +2278,12 @@ cachedInterpret fa = do
              -- clean-up later.
              mergeTmpFsInto lcl_tmpfs (hsc_tmpfs hsc_env)
              -- Clear the logQueue if this node had it's own log queue
-             mapM_ (finishLogQueue . node_log_queue) mnbi
         return (env {hsc_env = local_hsc_env}, finaliser)
 
   -- Start running the action, but check the queue first to check whether
   -- someone else has already started running it.
   lift $ MaybeT $ liftIO $ queueAction actionMap fa initialiser $ \env ->
     runMaybeT $ runReaderT (actionInterpret fa) env
-
-getNBI :: Monad m => MakeAction a -> ReaderT MakeEnv m (Maybe NodeBuildInfo)
-getNBI fa = do
-  m_map <- asks mod_map
-  case fa of
-    Make_TypecheckInstantiatedUnit iu ->
-      return $ Map.lookup (NodeKey_Unit iu) m_map
-    Make_CompileModule ms ->
-      return $ Map.lookup (NodeKey_Module (mkHomeBuildModule0 ms)) m_map
-    _ -> return Nothing
 
 addDepsToHscEnv ::  [HomeModInfo] -> HscEnv -> HscEnv
 addDepsToHscEnv deps hsc_env =
@@ -2327,6 +2316,21 @@ wrapAction hsc_env k = do
                                     _ -> errorMsg lcl_logger (text (show exc))
                     return Nothing
 
+withParLog:: (MonadIO m, MC.MonadMask m) => Int -> (HscEnv -> ReaderT MakeEnv m a) -> ReaderT MakeEnv m a
+withParLog n k  = do
+  MakeEnv{lqq_var, hsc_env} <- ask
+  -- Make a new log queue
+  lq <- liftIO $ newLogQueue n
+  -- Add it into the LogQueueQueue
+  liftIO $ atomically $ initLogQueue lqq_var lq
+  -- Modify the logger to use the log queue
+  let lcl_logger = pushLogHook (const (parLogAction lq)) (hsc_logger hsc_env)
+      hsc_env' = hsc_env { hsc_logger = lcl_logger }
+  -- Run continuation with modified logger and then clean-up
+  k hsc_env' `MC.finally` liftIO (finishLogQueue lq)
+
+
+
 -- | Actually interpret a MakeAction into, this is the part which is cached.
 actionInterpret :: MakeAction a -> ReaderT MakeEnv (MaybeT IO) a
 actionInterpret fa =
@@ -2335,20 +2339,18 @@ actionInterpret fa =
       MakeEnv{..} <- ask
       let nbi = expectJust "build_module" $ Map.lookup (NodeKey_Unit ui) mod_map
           (k, n) = nk nbi
-          lq = node_log_queue nbi
-      -- Wait for the dependencies of this node
-      deps <- unwrap (build_deps nbi)
-      -- Output of the logger is mediated by a central worker to
-      -- avoid output interleaving
-      let lcl_logger = pushLogHook (const (parLogAction lq)) (hsc_logger hsc_env)
-      let lcl_hsc_env = addDepsToHscEnv deps hsc_env { hsc_logger = lcl_logger }
-      lift $ MaybeT $ wrapAction lcl_hsc_env $ upsweep_inst lcl_hsc_env (Just batchMsg) k n ui
+      withParLog k $ \hsc_env -> do
+        -- Wait for the dependencies of this node
+        deps <- unwrap (build_deps nbi)
+        -- Output of the logger is mediated by a central worker to
+        -- avoid output interleaving
+        let lcl_hsc_env = addDepsToHscEnv deps hsc_env
+        lift $ MaybeT $ wrapAction lcl_hsc_env $ upsweep_inst lcl_hsc_env (Just batchMsg) k n ui
     Make_CompileModule mod -> do
       MakeEnv{..} <- ask
       let node_key = NodeKey_Module $ mkHomeBuildModule0 mod
           nbi = expectJust "build_module" $ Map.lookup node_key mod_map
           (k, n) = nk nbi
-          lq = node_log_queue nbi
           mk_mod = case ms_hsc_src mod of
                         HsigFile ->
                           let mod_name = homeModuleInstantiation (hsc_home_unit hsc_env) (ms_mod mod)
@@ -2356,36 +2358,29 @@ actionInterpret fa =
                         _ -> return emptyModuleEnv
 
       knot_var <- liftIO $ maybe mk_mod return (build_node_var nbi)
-
-      do
+      withParLog k $ \hsc_env -> do
         deps <- unwrap (build_deps nbi)
         let -- Use the cached DynFlags which includes OPTIONS_GHC pragmas
             lcl_dynflags = ms_hspp_opts mod
-            lcl_logger =
-              -- Set the log hook to the action which pipes into the log queue
-              pushLogHook (const (parLogAction lq)) (hsc_logger hsc_env)
         let lcl_hsc_env =
-                -- Localise the logger to use the cached flags
+                -- Localise the hsc_env to use the cached flags
                 addDepsToHscEnv deps $
                 hscSetFlags lcl_dynflags $
-                hsc_env { hsc_logger = lcl_logger
-                        , hsc_type_env_vars = knotVarsFromModuleEnv knot_var }
+                hsc_env { hsc_type_env_vars = knotVarsFromModuleEnv knot_var }
         -- Compile the module
         lift $ MaybeT (wrapAction lcl_hsc_env $ upsweep_mod lcl_hsc_env (Just batchMsg) old_hpt mod k n)
     Make_TypecheckLoop knot_var nk deps -> do
       hsc_env <- asks hsc_env
-      env <- ask
-      -- This is a bit awkward as you need to make sure that all the modules are queued
-      -- so that the log queues get finished so need to be really careful to not
-      -- to use the early cut-off from MaybeT.
-      hmis <- liftIO $ sequence $ map (runMaybeT . flip runReaderT env . useMGN) nk
       other_deps <- process_deps deps
-      lift $ MaybeT $ case sequence hmis of
-        Nothing -> return Nothing
-        Just hmis -> do
-          let hmis' = catMaybes hmis
+      env <- ask
+      -- Important to maintain parrelism here, the MaybeT transformer linearises the build because of early cut-off
+      hmis <- sequence <$> (liftIO $ runConcurrently (mapM (runMaybeT . flip runReaderT env . useMGN) nk))
+      case hmis of
+        Nothing -> lift $ MaybeT $ return Nothing
+        Just hmis' -> do
           let lcl_hsc_env = addDepsToHscEnv other_deps $ hsc_env { hsc_type_env_vars =  knotVarsFromModuleEnv knot_var }
-          liftIO $ Just . map snd <$> typecheckLoop lcl_hsc_env hmis'
+          lift $ MaybeT $ Just . map snd <$> typecheckLoop lcl_hsc_env (catMaybes hmis')
+
 
 useMGN :: TPipelineClass MakeAction p =>  ModuleGraphNode -> p (Maybe HomeModInfo)
 useMGN (InstantiationNode x) = const Nothing <$> use (Make_TypecheckInstantiatedUnit x)
@@ -2399,15 +2394,33 @@ process_deps (x:xs) = do
     Nothing -> process_deps xs
     Just hmi -> (hmi:) <$> process_deps xs
 
+
+
+
+
 -- | Start a thread which reads from the given log queues.
-logThread :: Logger -> [LogQueue] -> IO (IO ())
-logThread logger all_lqs = do
+logThread :: Logger -> TVar Bool -- Signal that no more new logs will be added, clear the queue and exit
+                    -> TVar LogQueueQueue -- Queue for logs
+                    -> IO (IO ())
+logThread logger stopped lqq_var = do
   finished_var <- newEmptyMVar
-  _ <- forkIO $ loop finished_var all_lqs
+  _ <- forkIO $ print_logs *> putMVar finished_var ()
   return (takeMVar finished_var)
   where
-    loop finished_var [] = putMVar finished_var ()
-    loop finished_var (lq:lqs) = printLogs logger lq *> loop finished_var lqs
+    finish = mapM (printLogs logger)
+
+    print_logs = join $ atomically $ do
+      lqq <- readTVar lqq_var
+      case dequeueLogQueueQueue lqq of
+        Just (lq, lqq') -> do
+          writeTVar lqq_var lqq'
+          return (printLogs logger lq *> print_logs)
+        Nothing -> do
+          -- No log to print, check if we are finished.
+          stopped <- readTVar stopped
+          if not stopped then retry
+                         else return (finish (allLogQueues lqq))
+
 
 
 -- | Build and run a pipeline
@@ -2424,8 +2437,14 @@ cachedRunModPipeline n_jobs orig_hsc_env old_hpt pipelines = do
 
   -- A variable which stores the actions
   action_map <- newMVar emptyDepMap
+  -- A variable which we write to when an error has happened and we have to tell the
+  -- logging thread to gracefully shut down.
+  stopped_var <- newTVarIO False
+  -- The queue of LogQueues which actions are able to write to. When an action starts it
+  -- will add it's LogQueue into this queue.
+  log_queue_queue_var <- newTVarIO newLogQueueQueue
   -- Thread which coordinates the printing of logs
-  wait_log_thread <- logThread (hsc_logger orig_hsc_env) (map node_log_queue pipelines)
+  wait_log_thread <- logThread (hsc_logger orig_hsc_env) stopped_var log_queue_queue_var
 
   -- Make the logger thread-safe, in case there is some output which isn't sent via the LogQueue.
   thread_safe_logger <- liftIO $ makeThreadSafe (hsc_logger orig_hsc_env)
@@ -2444,12 +2463,13 @@ cachedRunModPipeline n_jobs orig_hsc_env old_hpt pipelines = do
   let resetNumCapabilities orig_n = do
           liftIO $ setNumCapabilities orig_n
           (readMVar action_map >>= killAllActions)
+          atomically $ writeTVar stopped_var True
           wait_log_thread
 
   let run_pipeline :: WrappedMakePipeline a -> IO (Maybe a)
       run_pipeline (WrappedPipeline p) =
         -- For how actions are interpreted, see cachedInterpret
-        runMaybeT (runReaderT p (MakeEnv thread_safe_hsc_env old_hpt nbi_map action_map))
+        runMaybeT (runReaderT p (MakeEnv thread_safe_hsc_env old_hpt nbi_map action_map log_queue_queue_var))
 
   MC.bracket updNumCapabilities resetNumCapabilities $ \_ ->
     runConcurrently $ traverse (Concurrently . run_pipeline) all_pipelines

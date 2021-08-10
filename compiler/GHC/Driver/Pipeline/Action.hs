@@ -13,6 +13,12 @@ module GHC.Driver.Pipeline.Action (ActionResult(..)
                                   , writeLogQueue
                                   , parLogAction
                                   , printLogs
+
+                                  , LogQueueQueue(..)
+                                  , initLogQueue
+                                  , allLogQueues
+                                  , newLogQueueQueue
+                                  , dequeueLogQueueQueue
                                   ) where
 
 import GHC.Prelude
@@ -25,6 +31,8 @@ import GHC.Types.SrcLoc
 import GHC.Utils.Logger
 import qualified Control.Monad.Catch as MC
 import GHC.Utils.Outputable
+import qualified Data.IntMap as IM
+import Control.Concurrent.STM
 
 -- The 'Action' abstraction
 
@@ -80,9 +88,10 @@ queueAction act_var key initialiser raw_act = do
 -- | Each module is given a unique 'LogQueue' to redirect compilation messages
 -- to. A 'Nothing' value contains the result of compilation, and denotes the
 -- end of the message queue.
-data LogQueue = LogQueue !Int
-                         !(IORef [Maybe (MessageClass, SrcSpan, SDoc, LogFlags)])
-                         !(MVar ())
+data LogQueue = LogQueue { logQueueId :: !Int
+                         , logQueueMessages :: !(IORef [Maybe (MessageClass, SrcSpan, SDoc, LogFlags)])
+                         , logQueueSemaphore :: !(MVar ())
+                         }
 
 newLogQueue :: Int -> IO LogQueue
 newLogQueue n = do
@@ -127,4 +136,26 @@ printLogs !logger (LogQueue _n ref sem) = read_msgs
                 print_loop xs
             -- Exit the loop once we encounter the end marker.
             Nothing -> return ()
+
+-- The LogQueueQueue abstraction
+
+data LogQueueQueue = LogQueueQueue Int (IM.IntMap LogQueue)
+
+newLogQueueQueue :: LogQueueQueue
+newLogQueueQueue = LogQueueQueue 1 IM.empty
+
+addToQueueQueue :: LogQueue -> LogQueueQueue -> LogQueueQueue
+addToQueueQueue lq (LogQueueQueue n im) = LogQueueQueue n (IM.insert (logQueueId lq) lq im)
+
+initLogQueue :: TVar LogQueueQueue -> LogQueue -> STM ()
+initLogQueue lqq lq = modifyTVar lqq (addToQueueQueue lq)
+
+-- | Return all items in the queue in ascending order
+allLogQueues :: LogQueueQueue -> [LogQueue]
+allLogQueues (LogQueueQueue _n im) = IM.elems im
+
+dequeueLogQueueQueue :: LogQueueQueue -> Maybe (LogQueue, LogQueueQueue)
+dequeueLogQueueQueue (LogQueueQueue n lqq) = case IM.minViewWithKey lqq of
+                                                Just ((k, v), lqq') | k == n -> Just (v, LogQueueQueue (n + 1) lqq')
+                                                _ -> Nothing
 
