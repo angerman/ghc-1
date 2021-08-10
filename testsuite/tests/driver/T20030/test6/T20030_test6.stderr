@@ -1,6 +1,6 @@
 [ 1 of 12] Compiling L1[boot]         ( L1.hs-boot, L1.o-boot )
-[ 2 of 12] Compiling L1_1             ( L1_1.hs, L1_1.o )
-[ 3 of 12] Compiling L2[boot]         ( L2.hs-boot, L2.o-boot )
+[ 2 of 12] Compiling L2[boot]         ( L2.hs-boot, L2.o-boot )
+[ 3 of 12] Compiling L1_1             ( L1_1.hs, L1_1.o )
 [ 4 of 12] Compiling L2_1             ( L2_1.hs, L2_1.o )
 [ 5 of 12] Compiling L1_2             ( L1_2.hs, L1_2.o )
 [ 6 of 12] Compiling L1               ( L1.hs, L1.o )
