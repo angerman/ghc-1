@@ -2078,10 +2078,8 @@ initIfaceTcRn thing_inside
                          }
         ; setEnvs (if_env, ()) thing_inside }
 
--- Used when sucking in a ModIface into a ModDetails to put in
--- the HPT.  Notably, unlike initIfaceCheck, this does NOT use
--- hsc_type_env_var (since we're not actually going to typecheck,
--- so this variable will never get updated!)
+-- | 'initIfaceLoad' can be used when there's no chance that the action will
+-- call 'typecheckIface' and hence 'tcIfaceGlobal'.
 initIfaceLoad :: HscEnv -> IfG a -> IO a
 initIfaceLoad hsc_env do_this
  = do let gbl_env = IfGblEnv {
@@ -2090,10 +2088,9 @@ initIfaceLoad hsc_env do_this
                     }
       initTcRnIf 'i' hsc_env gbl_env () do_this
 
--- Used when sucking in a ModIface into a ModDetails to put in
--- the HPT.  Notably, unlike initIfaceCheck, this does NOT use
--- hsc_type_env_var (since we're not actually going to typecheck,
--- so this variable will never get updated!)
+-- | This is used when we are doing to call 'typecheckModule' on an 'ModIface',
+-- if it's part of a loop with some other modules then we need to use their
+-- IORef TypeEnv vars when typechecking but crucially not our own.
 initIfaceLoadModule :: HscEnv -> Module -> IfG a -> IO a
 initIfaceLoadModule hsc_env this_mod do_this
  = do let gbl_env = IfGblEnv {

@@ -1816,7 +1816,7 @@ tcIfaceGlobal name
         ; cur_mod <- if_mod <$> getLclEnv
         ; case lookupKnotVars (if_rec_types env) (fromMaybe cur_mod (nameModule_maybe name))  of     -- Note [Tying the knot]
             Just get_type_env
-                -> do           -- It's defined in the module being compiled
+                -> do           -- It's defined in a module in the hs-boot loop
                 { type_env <- setLclEnv () get_type_env         -- yuk
                 ; case lookupNameEnv type_env name of
                     Just thing -> return thing
