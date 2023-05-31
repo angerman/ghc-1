@@ -2038,6 +2038,7 @@ ocResolve_PEi386 ( ObjectCode* oc )
                }
             case 2: /* R_X86_64_32 (ELF constant 10) - IMAGE_REL_AMD64_ADDR32 (PE constant 2) */
             case 3: /* IMAGE_REL_AMD64_ADDR32NB (PE constant 3) */
+            case 14: /* R_X86_64_PC64 (ELF constant 24) - IMAGE_REL_AMD64_SREL32 (PE constant 14) */
             case 17: /* R_X86_64_32S ELF constant, no PE mapping. See note [ELF constant in PE file] */
                {
                    uint64_t v;
